@@ -1,4 +1,5 @@
 voicelock-env/
+voicelock-tse-env/
 __pycache__/
 *.pyc
 *.wav
@@ -7,3 +8,10 @@ __pycache__/
 *.mkv
 host_profile.npy
 .DS_Store
+
+# Pretrained model checkpoints / caches (large binaries, never commit these)
+*.pth
+*.ckpt
+checkpoints/
+exp/
+.cache/
