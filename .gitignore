@@ -1,0 +1,9 @@
+voicelock-env/
+__pycache__/
+*.pyc
+*.wav
+*.mp4
+*.mov
+*.mkv
+host_profile.npy
+.DS_Store
