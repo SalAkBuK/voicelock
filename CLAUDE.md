@@ -33,8 +33,8 @@ hecklers who are louder than the target speaker.
 | Phase | Goal | Definition of done |
 |---|---|---|
 | 0 | Environment + repo setup | Hardware detected and reported (CPU/CUDA/MPS) via `torch.cuda.is_available()` / `torch.backends.mps.is_available()`; git initialized; remote connected to the user's GitHub URL; first commit pushed. |
-| 1 | Single-speaker proof of concept | `test_extraction.py` accepts either a YouTube URL or a local file path, plus a reference clip in/out timestamp. It downloads (if URL) or loads (if local file), runs `MossFormer2_TSE` against the full clip using the reference as the target, and writes `test_output.wav`. User confirms by ear that the target voice is intelligible. |
-| 2 | Dual-speaker extraction | Same pipeline, but enrolls two speakers (host + guest) and produces two isolated tracks. User confirms each track contains only its intended speaker. |
+| 1 | Single-speaker proof of concept — **DONE** | `test_extraction.py` accepts either a YouTube URL or a local file path, plus a reference clip in/out timestamp. It downloads (if URL) or loads (if local file), runs ESPnet2 TD-SpeakerBeam against the full clip using the reference as the target, and writes `test_output.wav`. Actual result on a synthetic 0dB two-speaker test: SI-SDR improvement 8.89dB (clears the checkpoint's published >=7dB bar), Whisper WER 100% (raw mixture, nonsense transcript) -> 29.2% (extracted output, recognizable and mostly correct) against a 16.7% clean-audio ceiling. An enrollment A/B swap test confirmed the model is genuinely steered by whichever speaker's clip is used as reference, not ignoring it. User confirmed the phase complete based on this evidence. |
+| 2 | Dual-speaker extraction | Same pipeline, but enrolls two speakers (host + guest) and produces two isolated tracks. User confirms each track contains only its intended speaker. Note: the TD-SpeakerBeam checkpoint's config shows `model_conf.num_spk: 2`, and `SeparateSpeech.num_spk` reads this directly — it may support a single joint call (`enroll_ref1` + `enroll_ref2` together) returning both tracks at once, rather than the sequential two-pass design originally assumed below. Verify empirically; fall back to two sequential single-enrollment calls (Phase 1's proven pattern) if the joint call doesn't pan out. |
 | 3 | Long-file chunking | Sliding-window inference (~30s windows, 2s cross-fade) so hour-long files don't OOM. Verify with a synthetic sine-wave test that cross-fades don't produce audible clicks before testing on real audio. |
 | 4 | Mix + lossless remux | Combine both isolated tracks with an ambience-bleed blend (5–10% of raw audio), then remux into the original video container with `ffmpeg -c:v copy` (no video re-encode). |
 | 5 | Minimal UI | Streamlit: file drop, host profile dropdown, guest timestamp picker, ambience slider, process button. Only build this after Phase 2 is confirmed working. |
@@ -45,7 +45,7 @@ hecklers who are louder than the target speaker.
 [Input: .mp4 / .mov / .wav]
         |
         v
-[FFmpeg Demux + Normalize]  -- 16kHz mono PCM, EBU R128 loudness
+[FFmpeg Demux + Normalize]  -- 8kHz mono PCM, EBU R128 loudness
         |
   +-----+------+
   |            |
@@ -57,7 +57,7 @@ hecklers who are louder than the target speaker.
   |            |
   +-----+------+
         v
-[TSE Extraction Backbone: MossFormer2_TSE / SpEx+]
+[TSE Extraction Backbone: ESPnet2 TD-SpeakerBeam]
    Pass 1 -> host_clean.wav   Pass 2 -> guest_clean.wav
         |
         v
@@ -71,12 +71,40 @@ hecklers who are louder than the target speaker.
 
 - Python 3.10+
 - PyTorch, ONNX Runtime
-- `clearvoice` (ClearerVoice-Studio, `MossFormer2_TSE`) as primary backbone;
-  `wesep` as fallback if clearvoice has install issues
-- SpeechBrain or WeSep's ECAPA-TDNN for speaker embeddings
+- `espnet` + `espnet_model_zoo` (ESPnet2 TD-SpeakerBeam) as the actual TSE
+  backbone, via `SeparateSpeech.from_pretrained(model_tag=...)` — checkpoint
+  tag `espnet/Wangyou_Zhang_librimix_train_enh_tse_td_speakerbeam_raw`.
+  `clearvoice` (ClearerVoice-Studio) is kept installed in `voicelock-env`
+  only as a possible future speech-enhancement/post-processing tool, NOT
+  for TSE — its only TSE model (`AV_MossFormer2_TSE_16K`) is audio-visual
+  (needs video/lip cues, not a plain audio reference clip). WeSep was
+  evaluated and dropped: it's a training-recipe toolkit with no pretrained
+  checkpoints available, which conflicts with "never train from scratch."
 - `ffmpeg-python`, `torchaudio`, `soundfile`, `librosa` for audio/video I/O
 - `yt-dlp` for pulling test clips
 - Streamlit for the eventual UI (Phase 5 only)
+
+## Environment
+
+Two separate virtual environments, both Python 3.11 (not the system's
+3.13 — no prebuilt Windows wheels for numpy/librosa/clearvoice on 3.13 at
+time of writing, and clearvoice hard-pins `numpy<2.0` which has no 3.13
+wheel at all):
+
+- `voicelock-env` — clearvoice, yt-dlp, ffmpeg-python, torch/torchaudio.
+- `voicelock-tse-env` — espnet, espnet_model_zoo, torch/torchaudio (CUDA
+  12.4 build), yt-dlp, soundfile, ffmpeg-python. This is where
+  `test_extraction.py` actually runs.
+
+Kept separate because `espnet` requires `numpy>=2.0` while `clearvoice`
+pins `numpy<2.0` — installing both in the same venv forces a numpy
+downgrade that silently breaks whichever package needed the newer version
+(confirmed via `pip install --dry-run` before it ever hit a real
+environment).
+
+The system `ffmpeg` binary (not just the `ffmpeg-python` wrapper) is also
+required and was not on PATH by default on this machine — installed via
+`winget install Gyan.FFmpeg`.
 
 ## Functional requirements (MVP)
 
@@ -96,6 +124,13 @@ hecklers who are louder than the target speaker.
 - Stage 2 (real footage): a real YouTube or user-provided clip with actual
   heckling. Judge by ear — no automated metric substitutes for this at MVP
   stage.
+- SI-SDR (vs. clean reference) and Whisper transcript word-error-rate (vs.
+  known ground truth) are now standard fast, objective pre-checks — used
+  successfully in Phase 1 to catch real signal in extraction output and to
+  rule out pipeline bugs before ever needing to listen. Run these first.
+  They do not replace ear confirmation as the actual definition of done —
+  a track can score reasonably and still contain audible artifacts a human
+  would flag (see Known issues).
 - Every phase's "definition of done" above must be confirmed by the user
   before moving to the next phase. Do not self-declare a phase complete.
 
