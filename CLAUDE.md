@@ -15,7 +15,8 @@ hecklers who are louder than the target speaker.
 ## Non-negotiable constraints
 
 - Never train a model from scratch. Use pretrained checkpoints only
-  (ClearerVoice-Studio's `MossFormer2_TSE`, or WeSep's SpEx+/BSRNN).
+  (currently ESPnet2 TD-SpeakerBeam via `espnet_model_zoo`; see Tech
+  Stack section for the specific checkpoint tag in use).
 - Do exactly what the current session's prompt asks — nothing more. If a task
   is genuinely blocked or ambiguous, stop and ask rather than guessing or
   expanding scope.
