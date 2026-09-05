@@ -36,7 +36,7 @@ hecklers who are louder than the target speaker.
 | 0 | Environment + repo setup | Hardware detected and reported (CPU/CUDA/MPS) via `torch.cuda.is_available()` / `torch.backends.mps.is_available()`; git initialized; remote connected to the user's GitHub URL; first commit pushed. |
 | 1 | Single-speaker proof of concept — **DONE** | `test_extraction.py` accepts either a YouTube URL or a local file path, plus a reference clip in/out timestamp. It downloads (if URL) or loads (if local file), runs ESPnet2 TD-SpeakerBeam against the full clip using the reference as the target, and writes `test_output.wav`. Actual result on a synthetic 0dB two-speaker test: SI-SDR improvement 8.89dB (clears the checkpoint's published >=7dB bar), Whisper WER 100% (raw mixture, nonsense transcript) -> 29.2% (extracted output, recognizable and mostly correct) against a 16.7% clean-audio ceiling. An enrollment A/B swap test confirmed the model is genuinely steered by whichever speaker's clip is used as reference, not ignoring it. User confirmed the phase complete based on this evidence. |
 | 2 | Dual-speaker extraction — **DONE** | `test_dual_extraction.py` enrolls two speakers (host + guest) and produces two isolated tracks. The hypothesized joint call (`enroll_ref1` + `enroll_ref2` in a single `separate_speech(...)` call, per the checkpoint's `model_conf.num_spk: 2`) worked exactly as expected — no fallback to sequential calls was needed. Actual result on a synthetic 0dB two-speaker test: SI-SDR track-swap cross-check came out clean (host track: 6.94dB vs. its own clean content, -21.98dB vs. the guest's — correct/incorrect split; guest track: -21.48dB vs. host's, 11.47dB vs. its own — correct/incorrect split), confirming no swapped or bled tracks. Whisper WER: host 45.8%, guest 27.6% (both clearly recognizable, rougher than Phase 1's single-speaker 29.2%, consistent with joint 2-speaker extraction being a harder task). User confirmed by ear that both tracks are correctly separated with no cross-bleed beyond what the known test-file timeline already explained. |
-| 3 | Long-file chunking | Sliding-window inference (~30s windows, 2s cross-fade) so hour-long files don't OOM. Verify with a synthetic sine-wave test that cross-fades don't produce audible clicks before testing on real audio. |
+| 3 | Long-file chunking — **DONE** | Sliding-window inference (~30s windows, 2s cross-fade) so hour-long files don't OOM, added as `chunked_extract()` in `test_extraction.py` and used by both single- and dual-speaker scripts. Sine-wave sanity test (`test_chunking_sanity.py`) passed: reconstruction error 2.98e-08, seam slopes indistinguishable from the sine wave's own natural curve. Real-audio chunked-vs-one-shot comparison on a 78s two-speaker test: SI-SDR 9.17dB vs. 9.36dB (negligible difference), Whisper WER 21.6% vs. 25.7% (comparable). Found and fixed a real bug during this: end-of-file window alignment caused an oversized ~9.9s crossfade at one seam, causing severe phase-cancellation ("demonic") distortion — the sine-wave test couldn't catch this since it used identity processing (mathematically invariant to overlap length); only real-audio testing surfaced it. Fix caps the blended transition at the intended `crossfade_sec` regardless of the geometric overlap size, sourcing any extra overlap from the nearer window's output instead of blending across the full oversized span. Confirmed by ear post-fix: the seam sounds identical to a one-shot control at the same region — remaining roughness there is baseline model quality (the known Phase 1/2 issue), not a chunking artifact. |
 | 4 | Mix + lossless remux | Combine both isolated tracks with an ambience-bleed blend (5–10% of raw audio), then remux into the original video container with `ffmpeg -c:v copy` (no video re-encode). |
 | 5 | Minimal UI | Streamlit: file drop, host profile dropdown, guest timestamp picker, ambience slider, process button. Only build this after Phase 2 is confirmed working. |
 
@@ -151,6 +151,27 @@ required and was not on PATH by default on this machine — installed via
   reduction is revisited later, it needs a TSE-specific approach (e.g. a
   second-pass TSE-aware post-filter, or a better/fine-tuned TSE checkpoint),
   not a generic noise suppressor.
+
+- **Oversized end-of-file overlaps are a real edge case in overlap-add
+  chunking.** `chunked_extract()`'s window-start generation forces the
+  final window to align exactly with the file's end, which can make its
+  geometric overlap with the previous window much larger than the intended
+  `crossfade_sec` (observed: ~9.9s instead of ~2s on a 78s test file).
+  Blending two independently-produced model outputs over that large a span
+  caused severe phase-cancellation distortion at that seam. Fixed by
+  capping the actual cross-faded transition at `crossfade_sec` regardless
+  of the geometric overlap size. Worth a regression test if the window/hop
+  sizing logic in `chunked_extract()` changes later — the sine-wave sanity
+  test alone won't catch this class of bug (see Phase 3's row above).
+
+## Project conventions
+
+- **Debug audio** lives in `debug_audio/{phase1,phase2,phase3}/`, gitignored
+  by default. Each phase's subfolder holds that phase's scratch test-output
+  wav files with clear, short names (e.g. `seam58_before_fix.wav`); see
+  `debug_audio/README.md` for a one-line manifest of what each file is.
+  Force-add (`git add -f`) only the specific files actually needed for a
+  given review, not the whole folder.
 
 ## Session hygiene
 

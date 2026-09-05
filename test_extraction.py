@@ -69,6 +69,71 @@ def download_audio(url: str, out_dir: Path) -> Path:
     return downloaded[0]
 
 
+def chunked_extract(process_fn, mixture: np.ndarray, sr: int, window_sec: float = 30.0, crossfade_sec: float = 2.0):
+    """
+    Split `mixture` into overlapping windows, run `process_fn` on each, and
+    reassemble with a linear cross-fade over the overlap so long inputs can
+    be processed in bounded-memory chunks instead of one giant pass.
+
+    process_fn(chunk: np.ndarray) -> sequence of np.ndarray, one or more
+    output tracks the same length as `chunk`.
+
+    Returns a list of np.ndarray, one per output track, each the same
+    length as `mixture`. If `mixture` fits in one window, chunking is
+    skipped entirely and process_fn is called once on the whole thing.
+    """
+    window_len = int(window_sec * sr)
+    crossfade_len = int(crossfade_sec * sr)
+    hop_len = window_len - crossfade_len
+    total_len = len(mixture)
+
+    if total_len <= window_len:
+        return list(process_fn(mixture))
+
+    starts = sorted(set(list(range(0, total_len - window_len, hop_len)) + [total_len - window_len]))
+
+    outputs = None
+    for i, start in enumerate(starts):
+        end = start + window_len
+        chunk_outputs = list(process_fn(mixture[start:end]))
+        if outputs is None:
+            outputs = [np.zeros(total_len, dtype=np.float32) for _ in chunk_outputs]
+
+        if i == 0:
+            for t in range(len(outputs)):
+                outputs[t][start:end] = chunk_outputs[t]
+        else:
+            prev_end = starts[i - 1] + window_len
+            raw_overlap_len = prev_end - start
+
+            # The geometric overlap between windows can be much larger than
+            # crossfade_len -- e.g. when the final window is shifted to align
+            # exactly with the end of the file, it can end up mostly
+            # overlapping its predecessor. Blending two independently
+            # produced model outputs over an oversized span causes severe
+            # phase-cancellation/comb-filtering artifacts, not a smooth
+            # transition. So the actual cross-faded region is always capped
+            # at crossfade_len, placed right at the true boundary
+            # (prev_end); any extra overlap before that is redundant and
+            # resolved by keeping the previous window's output untouched
+            # (already written, more central within that window and further
+            # from its edges than the new window's competing estimate would
+            # be at its own start).
+            fade_len = min(raw_overlap_len, crossfade_len)
+            fade_start = prev_end - fade_len
+            new_part_offset = fade_start - start
+
+            fade_in = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+            fade_out = 1.0 - fade_in
+            for t in range(len(outputs)):
+                existing = outputs[t][fade_start:prev_end]
+                new_part = chunk_outputs[t][new_part_offset:new_part_offset + fade_len]
+                outputs[t][fade_start:prev_end] = existing * fade_out + new_part * fade_in
+                outputs[t][prev_end:end] = chunk_outputs[t][prev_end - start:]
+
+    return outputs
+
+
 def normalize_to_wav(input_path: Path, output_path: Path, sample_rate: int) -> None:
     """Convert any input media to mono PCM WAV at the given sample rate."""
     print(f"Normalizing audio to {sample_rate}Hz mono WAV...")
@@ -153,16 +218,20 @@ def main() -> None:
             device=device,
         )
 
-        print("Running extraction...")
-        mixture_batch = torch.as_tensor(mixture).unsqueeze(0)
         enrollment_batch = torch.as_tensor(enrollment).unsqueeze(0)
-        results = separate_speech(mixture_batch, fs=sr, enroll_ref1=enrollment_batch)
 
-        extracted = results[0]
-        if isinstance(extracted, torch.Tensor):
-            extracted = extracted.squeeze(0).cpu().numpy()
-        else:
-            extracted = np.squeeze(extracted, axis=0)
+        def process_chunk(chunk: np.ndarray):
+            chunk_batch = torch.as_tensor(chunk).unsqueeze(0)
+            results = separate_speech(chunk_batch, fs=sr, enroll_ref1=enrollment_batch)
+            out = results[0]
+            if isinstance(out, torch.Tensor):
+                out = out.squeeze(0).cpu().numpy()
+            else:
+                out = np.squeeze(out, axis=0)
+            return [out]
+
+        print("Running extraction (chunked into ~30s windows for long inputs)...")
+        [extracted] = chunked_extract(process_chunk, mixture, sr)
 
         sf.write(args.output, extracted, sr)
         print(f"Wrote {args.output} ({len(extracted) / sr:.1f}s at {sr}Hz)")
