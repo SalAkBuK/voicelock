@@ -99,6 +99,23 @@ hecklers who are louder than the target speaker.
 - Every phase's "definition of done" above must be confirmed by the user
   before moving to the next phase. Do not self-declare a phase complete.
 
+## Known issues
+
+- **Generic denoising does not fix TSE residual artifacts.** Tried
+  DeepFilterNet (DeepFilterNet3) as a post-extraction cleanup pass on the
+  hardest Phase 1 test case (0dB two-speaker mixture). Measured by Whisper
+  word-error-rate against the known ground-truth transcript, it made things
+  *worse*, not better: 29.2% WER before cleanup -> 37.5% WER after. RNNoise
+  was considered but not tried once DeepFilterNet's result came back negative.
+  General-purpose denoisers (RNNoise, DeepFilterNet) are trained to remove
+  stationary background noise (hiss, fans, room tone) — they are not suited
+  to the residual cross-talk/artifacts a TSE model leaves behind, and appear
+  to smooth over correct target-speaker content along with the artifacts.
+  Don't retry generic denoising as a fix for TSE output quality. If artifact
+  reduction is revisited later, it needs a TSE-specific approach (e.g. a
+  second-pass TSE-aware post-filter, or a better/fine-tuned TSE checkpoint),
+  not a generic noise suppressor.
+
 ## Session hygiene
 
 - One phase (or sub-task within a phase) per session. Do not jump ahead.
