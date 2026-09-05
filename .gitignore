@@ -3,6 +3,7 @@ voicelock-tse-env/
 __pycache__/
 *.pyc
 *.wav
+debug_audio/
 *.mp4
 *.mov
 *.mkv
