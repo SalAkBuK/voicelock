@@ -192,6 +192,11 @@ required and was not on PATH by default on this machine — installed via
   this — deferred for now since it adds a new UI dependency to a phase
   CLAUDE.md scopes as minimal.
 
+- **No project skill yet for launching/screenshotting `app.py`.**
+  Verifying Phase 5's UI required installing Playwright + Chromium on the
+  fly — not previously set up. Worth running `/run-skill-generator` at
+  some point so future sessions have this pre-configured, but not urgent.
+
 ## Project conventions
 
 - **Debug audio** lives in `debug_audio/{phase1,phase2,phase3}/`, gitignored
