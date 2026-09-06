@@ -37,7 +37,7 @@ hecklers who are louder than the target speaker.
 | 1 | Single-speaker proof of concept — **DONE** | `test_extraction.py` accepts either a YouTube URL or a local file path, plus a reference clip in/out timestamp. It downloads (if URL) or loads (if local file), runs ESPnet2 TD-SpeakerBeam against the full clip using the reference as the target, and writes `test_output.wav`. Actual result on a synthetic 0dB two-speaker test: SI-SDR improvement 8.89dB (clears the checkpoint's published >=7dB bar), Whisper WER 100% (raw mixture, nonsense transcript) -> 29.2% (extracted output, recognizable and mostly correct) against a 16.7% clean-audio ceiling. An enrollment A/B swap test confirmed the model is genuinely steered by whichever speaker's clip is used as reference, not ignoring it. User confirmed the phase complete based on this evidence. |
 | 2 | Dual-speaker extraction — **DONE** | `test_dual_extraction.py` enrolls two speakers (host + guest) and produces two isolated tracks. The hypothesized joint call (`enroll_ref1` + `enroll_ref2` in a single `separate_speech(...)` call, per the checkpoint's `model_conf.num_spk: 2`) worked exactly as expected — no fallback to sequential calls was needed. Actual result on a synthetic 0dB two-speaker test: SI-SDR track-swap cross-check came out clean (host track: 6.94dB vs. its own clean content, -21.98dB vs. the guest's — correct/incorrect split; guest track: -21.48dB vs. host's, 11.47dB vs. its own — correct/incorrect split), confirming no swapped or bled tracks. Whisper WER: host 45.8%, guest 27.6% (both clearly recognizable, rougher than Phase 1's single-speaker 29.2%, consistent with joint 2-speaker extraction being a harder task). User confirmed by ear that both tracks are correctly separated with no cross-bleed beyond what the known test-file timeline already explained. |
 | 3 | Long-file chunking — **DONE** | Sliding-window inference (~30s windows, 2s cross-fade) so hour-long files don't OOM, added as `chunked_extract()` in `test_extraction.py` and used by both single- and dual-speaker scripts. Sine-wave sanity test (`test_chunking_sanity.py`) passed: reconstruction error 2.98e-08, seam slopes indistinguishable from the sine wave's own natural curve. Real-audio chunked-vs-one-shot comparison on a 78s two-speaker test: SI-SDR 9.17dB vs. 9.36dB (negligible difference), Whisper WER 21.6% vs. 25.7% (comparable). Found and fixed a real bug during this: end-of-file window alignment caused an oversized ~9.9s crossfade at one seam, causing severe phase-cancellation ("demonic") distortion — the sine-wave test couldn't catch this since it used identity processing (mathematically invariant to overlap length); only real-audio testing surfaced it. Fix caps the blended transition at the intended `crossfade_sec` regardless of the geometric overlap size, sourcing any extra overlap from the nearer window's output instead of blending across the full oversized span. Confirmed by ear post-fix: the seam sounds identical to a one-shot control at the same region — remaining roughness there is baseline model quality (the known Phase 1/2 issue), not a chunking artifact. |
-| 4 | Mix + lossless remux | Combine both isolated tracks with an ambience-bleed blend (5–10% of raw audio), then remux into the original video container with `ffmpeg -c:v copy` (no video re-encode). |
+| 4 | Mix + lossless remux — **DONE** | `test_mix_remux.py` sums the host + guest tracks, applies two peak-safety checks (post-sum and post-ambience-blend, capping at ~0.98 peak), upsamples to 48kHz (needed to blend with full-bandwidth ambience audio and land at a standard deliverable rate — does not itself improve extracted-voice fidelity, which stays capped by the model's 8kHz/~4kHz training bandwidth; see Known Issues/Future), blends in a 7.5% raw-audio ambience bleed (within FR-05's 0-20% range, confirmed by ear as sounding right), loudness-normalizes via ffmpeg's `loudnorm` (EBU R128), and remuxes into the source video container via `-c:v copy`. Prerequisite fix: `chunked_extract()` was also wired into `test_dual_extraction.py` (previously only single-speaker had it), verified bit-identical to the prior unchunked output on Phase 2's test case. Verified via `ffprobe`: output video's raw H.264 bitstream is byte-for-byte identical to the source's (true lossless passthrough, zero re-encode). Found and fixed a real bug: ffmpeg's `loudnorm` filter internally oversamples 4x for true-peak detection (48kHz -> 192kHz), and that inflated rate was leaking into the output until `-ar 48000` was pinned explicitly on both the loudnorm and remux steps. User confirmed by ear: correct structure (host intro, guest intro, then overlapping mixture), ambience level sounds right, video plays correctly. |
 | 5 | Minimal UI | Streamlit: file drop, host profile dropdown, guest timestamp picker, ambience slider, process button. Only build this after Phase 2 is confirmed working. |
 
 ## Architecture
@@ -163,6 +163,26 @@ required and was not on PATH by default on this machine — installed via
   of the geometric overlap size. Worth a regression test if the window/hop
   sizing logic in `chunked_extract()` changes later — the sine-wave sanity
   test alone won't catch this class of bug (see Phase 3's row above).
+
+- **Some players may have trouble with mono-AAC-in-mp4 output.** A Phase 4
+  test file appeared to have no audio in the user's default player;
+  confirmed via `ffprobe`/direct extraction that the file's audio was
+  genuinely present, correctly mapped, and correctly encoded — VLC played
+  it back correctly with no issues. The original playback problem was
+  specific to that player, not a bug in the file or pipeline. If this
+  comes up again for a real user, check player compatibility (try VLC)
+  before assuming a pipeline bug.
+
+## Future (out of scope for now)
+
+- **Genuine audio bandwidth improvement for extracted voices.** The TSE
+  model outputs 8kHz audio, capped at roughly a 4kHz frequency ceiling by
+  its training bandwidth. Phase 4's upsampling to 48kHz does NOT recover
+  this — it's needed only to blend with full-bandwidth ambience audio and
+  to land at a standard deliverable rate, not to improve voice fidelity.
+  Actually improving it would need a higher-native-rate TSE checkpoint, or
+  a proper upsampling/super-resolution model applied to the extracted
+  voice — separate, later scope from the mixing step.
 
 ## Project conventions
 

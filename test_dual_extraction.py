@@ -35,6 +35,7 @@ import torch
 from test_extraction import (
     DEFAULT_MODEL_TAG,
     MODEL_SAMPLE_RATE,
+    chunked_extract,
     download_audio,
     is_url,
     normalize_to_wav,
@@ -141,21 +142,19 @@ def main() -> None:
             device=device,
         )
 
-        mixture_batch = torch.as_tensor(mixture).unsqueeze(0)
         host_batch = torch.as_tensor(host_enroll).unsqueeze(0)
         guest_batch = torch.as_tensor(guest_enroll).unsqueeze(0)
 
-        print("Attempting joint call (both enrollments in one pass)...")
-        joint_result = run_joint_call(separate_speech, mixture_batch, host_batch, guest_batch, sr)
+        def process_chunk(chunk: np.ndarray):
+            chunk_batch = torch.as_tensor(chunk).unsqueeze(0)
+            joint_result = run_joint_call(separate_speech, chunk_batch, host_batch, guest_batch, sr)
+            if joint_result is not None:
+                return joint_result
+            return run_sequential_calls(separate_speech, chunk_batch, host_batch, guest_batch, sr)
 
-        if joint_result is not None:
-            print("Joint call succeeded -- using its two outputs.")
-            host_out, guest_out = joint_result
-        else:
-            print("Running two sequential single-enrollment calls instead...")
-            host_out, guest_out = run_sequential_calls(
-                separate_speech, mixture_batch, host_batch, guest_batch, sr
-            )
+        print("Running extraction (chunked into ~30s windows for long inputs;")
+        print("each chunk tries the joint call first, falling back to sequential calls)...")
+        host_out, guest_out = chunked_extract(process_chunk, mixture, sr)
 
         sf.write(args.host_output, host_out, sr)
         sf.write(args.guest_output, guest_out, sr)
