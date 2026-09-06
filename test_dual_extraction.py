@@ -92,22 +92,22 @@ def run_sequential_calls(separate_speech, mixture_batch, host_batch, guest_batch
     return _to_numpy(host_results[0]), _to_numpy(guest_results[0])
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", help="YouTube URL or local file path")
-    parser.add_argument("--host-start", required=True, help="Host reference clip start (MM:SS or seconds)")
-    parser.add_argument("--host-end", required=True, help="Host reference clip end (MM:SS or seconds)")
-    parser.add_argument("--guest-start", required=True, help="Guest reference clip start (MM:SS or seconds)")
-    parser.add_argument("--guest-end", required=True, help="Guest reference clip end (MM:SS or seconds)")
-    parser.add_argument("--host-output", default="test_output_host.wav", help="Where to write the host's extracted audio")
-    parser.add_argument("--guest-output", default="test_output_guest.wav", help="Where to write the guest's extracted audio")
-    parser.add_argument(
-        "--model-tag",
-        default=DEFAULT_MODEL_TAG,
-        help="ESPnet model_zoo tag for the pretrained TD-SpeakerBeam checkpoint",
-    )
-    args = parser.parse_args()
+def run_dual_extraction(
+    input_path,
+    host_start: str,
+    host_end: str,
+    guest_start: str,
+    guest_end: str,
+    model_tag: str = DEFAULT_MODEL_TAG,
+):
+    """
+    Run the full dual-speaker extraction pipeline in-process (no file I/O
+    for the outputs -- returns arrays directly, so callers like a UI don't
+    need to round-trip through disk). `input_path` may be a YouTube URL or
+    a local file path.
 
+    Returns (host_audio, guest_audio, sr).
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
@@ -117,10 +117,10 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
 
-        if is_url(args.input):
-            source_path = download_audio(args.input, tmp)
+        if is_url(str(input_path)):
+            source_path = download_audio(str(input_path), tmp)
         else:
-            source_path = Path(args.input)
+            source_path = Path(input_path)
             if not source_path.exists():
                 raise FileNotFoundError(f"No such file: {source_path}")
 
@@ -130,15 +130,15 @@ def main() -> None:
         mixture, sr = sf.read(normalized_path, dtype="float32")
         assert sr == MODEL_SAMPLE_RATE, f"expected {MODEL_SAMPLE_RATE}Hz, got {sr}Hz"
 
-        host_enroll = slice_clip(mixture, sr, args.host_start, args.host_end, "host")
-        guest_enroll = slice_clip(mixture, sr, args.guest_start, args.guest_end, "guest")
+        host_enroll = slice_clip(mixture, sr, host_start, host_end, "host")
+        guest_enroll = slice_clip(mixture, sr, guest_start, guest_end, "guest")
 
-        print(f"Loading pretrained model: {args.model_tag}")
+        print(f"Loading pretrained model: {model_tag}")
         print("(first run downloads the checkpoint, this can take a minute)")
         from espnet2.bin.enh_tse_inference import SeparateSpeech
 
         separate_speech = SeparateSpeech.from_pretrained(
-            model_tag=args.model_tag,
+            model_tag=model_tag,
             device=device,
         )
 
@@ -156,10 +156,34 @@ def main() -> None:
         print("each chunk tries the joint call first, falling back to sequential calls)...")
         host_out, guest_out = chunked_extract(process_chunk, mixture, sr)
 
-        sf.write(args.host_output, host_out, sr)
-        sf.write(args.guest_output, guest_out, sr)
-        print(f"Wrote {args.host_output} ({len(host_out) / sr:.1f}s at {sr}Hz)")
-        print(f"Wrote {args.guest_output} ({len(guest_out) / sr:.1f}s at {sr}Hz)")
+    return host_out, guest_out, sr
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", help="YouTube URL or local file path")
+    parser.add_argument("--host-start", required=True, help="Host reference clip start (MM:SS or seconds)")
+    parser.add_argument("--host-end", required=True, help="Host reference clip end (MM:SS or seconds)")
+    parser.add_argument("--guest-start", required=True, help="Guest reference clip start (MM:SS or seconds)")
+    parser.add_argument("--guest-end", required=True, help="Guest reference clip end (MM:SS or seconds)")
+    parser.add_argument("--host-output", default="test_output_host.wav", help="Where to write the host's extracted audio")
+    parser.add_argument("--guest-output", default="test_output_guest.wav", help="Where to write the guest's extracted audio")
+    parser.add_argument(
+        "--model-tag",
+        default=DEFAULT_MODEL_TAG,
+        help="ESPnet model_zoo tag for the pretrained TD-SpeakerBeam checkpoint",
+    )
+    args = parser.parse_args()
+
+    host_out, guest_out, sr = run_dual_extraction(
+        args.input, args.host_start, args.host_end, args.guest_start, args.guest_end,
+        model_tag=args.model_tag,
+    )
+
+    sf.write(args.host_output, host_out, sr)
+    sf.write(args.guest_output, guest_out, sr)
+    print(f"Wrote {args.host_output} ({len(host_out) / sr:.1f}s at {sr}Hz)")
+    print(f"Wrote {args.guest_output} ({len(guest_out) / sr:.1f}s at {sr}Hz)")
 
     print()
     print(f"Done. Please listen to {args.host_output} and {args.guest_output} and")

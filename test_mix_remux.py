@@ -75,46 +75,45 @@ def apply_loudnorm(input_path: Path, output_path: Path, sample_rate: int) -> dic
     return result.stderr
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", required=True, help="Original input media file")
-    parser.add_argument("--host-track", required=True, help="Extracted host track wav")
-    parser.add_argument("--guest-track", required=True, help="Extracted guest track wav")
-    parser.add_argument(
-        "--ambience", type=float, default=0.075,
-        help="Fraction of raw original audio blended back in (0-0.20 range, default 0.075)",
-    )
-    parser.add_argument("--output", default=None, help="Output path (default: test_output_mixed.mp4 or .wav)")
-    args = parser.parse_args()
+def run_mix_remux(
+    source_path,
+    host_audio: np.ndarray,
+    guest_audio: np.ndarray,
+    track_sr: int,
+    ambience: float = 0.075,
+    output_path=None,
+):
+    """
+    Run the full mix + lossless remux pipeline in-process. `host_audio` and
+    `guest_audio` are already-extracted track arrays (e.g. from
+    run_dual_extraction), not file paths -- callers like a UI don't need to
+    round-trip through disk for the tracks.
 
-    source_path = Path(args.source)
+    Returns (output_path, loudnorm_stats_text).
+    """
+    source_path = Path(source_path)
     if not source_path.exists():
         raise FileNotFoundError(f"No such file: {source_path}")
 
     video_present = has_video_stream(source_path)
-    output_path = Path(args.output) if args.output else Path(
-        "test_output_mixed.mp4" if video_present else "test_output_mixed.wav"
-    )
+    if output_path is None:
+        output_path = Path("test_output_mixed.mp4" if video_present else "test_output_mixed.wav")
+    else:
+        output_path = Path(output_path)
 
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
 
-        host, host_sr = sf.read(args.host_track, dtype="float32")
-        guest, guest_sr = sf.read(args.guest_track, dtype="float32")
-        if host_sr != guest_sr:
-            raise ValueError(f"host/guest sample rates differ: {host_sr} vs {guest_sr}")
-        sr = host_sr
-
-        n = min(len(host), len(guest))
-        mix = host[:n] + guest[:n]
+        n = min(len(host_audio), len(guest_audio))
+        mix = host_audio[:n] + guest_audio[:n]
 
         print("Peak-safety check #1 (after summing host + guest):")
         mix = ensure_peak_safe(mix, "combined mix")
 
-        print(f"Upsampling mix from {sr}Hz to {OUTPUT_SAMPLE_RATE}Hz...")
+        print(f"Upsampling mix from {track_sr}Hz to {OUTPUT_SAMPLE_RATE}Hz...")
         mix_path = tmp / "mix.wav"
         mix_upsampled_path = tmp / "mix_upsampled.wav"
-        sf.write(str(mix_path), mix, sr)
+        sf.write(str(mix_path), mix, track_sr)
         normalize_to_wav(mix_path, mix_upsampled_path, OUTPUT_SAMPLE_RATE)
         mix_up, _ = sf.read(str(mix_upsampled_path), dtype="float32")
 
@@ -127,8 +126,8 @@ def main() -> None:
         mix_up = mix_up[:m]
         raw = raw[:m]
 
-        print(f"Blending {args.ambience*100:.1f}% raw ambience into the mix...")
-        final = mix_up * (1.0 - args.ambience) + raw * args.ambience
+        print(f"Blending {ambience*100:.1f}% raw ambience into the mix...")
+        final = mix_up * (1.0 - ambience) + raw * ambience
 
         print("Peak-safety check #2 (after ambience blend):")
         final = ensure_peak_safe(final, "final blend")
@@ -144,7 +143,7 @@ def main() -> None:
                 print(f"  {line.strip()}")
 
         if video_present:
-            print(f"Remuxing into video container (lossless video passthrough)...")
+            print("Remuxing into video container (lossless video passthrough)...")
             cmd = [
                 "ffmpeg", "-y",
                 "-i", str(source_path),
@@ -154,17 +153,39 @@ def main() -> None:
                 "-shortest",
                 str(output_path),
             ]
-            print("  exact command:", " ".join(cmd))
             result = subprocess.run(cmd, capture_output=True, text=True)
-            print("  --- full ffmpeg stderr (remux) ---")
-            print(result.stderr)
-            print("  --- end ffmpeg stderr ---")
             if result.returncode != 0:
+                print(result.stderr, file=sys.stderr)
                 raise RuntimeError("ffmpeg remux failed, see error above")
         else:
             print("Source has no video stream -- writing mixed audio directly.")
             import shutil
             shutil.copyfile(normalized_audio_path, output_path)
+
+    return output_path, loudnorm_stats
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", required=True, help="Original input media file")
+    parser.add_argument("--host-track", required=True, help="Extracted host track wav")
+    parser.add_argument("--guest-track", required=True, help="Extracted guest track wav")
+    parser.add_argument(
+        "--ambience", type=float, default=0.075,
+        help="Fraction of raw original audio blended back in (0-0.20 range, default 0.075)",
+    )
+    parser.add_argument("--output", default=None, help="Output path (default: test_output_mixed.mp4 or .wav)")
+    args = parser.parse_args()
+
+    host, host_sr = sf.read(args.host_track, dtype="float32")
+    guest, guest_sr = sf.read(args.guest_track, dtype="float32")
+    if host_sr != guest_sr:
+        raise ValueError(f"host/guest sample rates differ: {host_sr} vs {guest_sr}")
+
+    output_path, _ = run_mix_remux(
+        args.source, host, guest, host_sr,
+        ambience=args.ambience, output_path=args.output,
+    )
 
     print()
     print(f"Wrote {output_path}")

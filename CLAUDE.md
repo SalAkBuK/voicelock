@@ -112,7 +112,7 @@ required and was not on PATH by default on this machine — installed via
 | ID | Feature | Requirement |
 |---|---|---|
 | FR-01 | Media Ingestion | Drag-and-drop or CLI arg: `.mp4`, `.mov`, `.mkv`, `.wav` up to 4GB |
-| FR-02 | Host Profile Lock | Persistent embedding (`host_profile.npy`) saved once, reused across projects |
+| FR-02 | Host Profile Lock | Persistent raw enrollment audio clip (`host_profiles/<name>.wav`) saved once, reused across projects — not a literal embedding vector; the pipeline has no documented API to extract/cache the model's internal speaker embedding separately, so the raw clip itself is what's persisted and re-fed to the model on each run |
 | FR-03 | Guest Enrollment | 3–8s clean segment marked by timestamp, embedding generated on the fly |
 | FR-04 | Dual-Pass Extraction | Two isolated tracks, all non-enrolled voices suppressed |
 | FR-05 | Ambience Bleed | 0–20% blend of raw audio back in, avoids a "dead room" sound |
@@ -183,6 +183,14 @@ required and was not on PATH by default on this machine — installed via
   Actually improving it would need a higher-native-rate TSE checkpoint, or
   a proper upsampling/super-resolution model applied to the extracted
   voice — separate, later scope from the mixing step.
+
+- **Visual waveform scrubber for timestamp entry.** Phase 5's host/guest
+  timestamp inputs are plain MM:SS text fields, reusing `parse_timestamp`
+  from Phase 1. Works, but manually guessing/typing timestamps is real
+  friction for picking a clean enrollment window. A visual waveform
+  scrubber (click-and-drag range selection) would meaningfully improve
+  this — deferred for now since it adds a new UI dependency to a phase
+  CLAUDE.md scopes as minimal.
 
 ## Project conventions
 
